@@ -80,7 +80,7 @@ describe('default resolution', () => {
   });
 });
 
-describe('custom resolution', () => {
+describe('real-life example', () => {
   let schema;
 
   beforeEach(() => {
@@ -103,7 +103,11 @@ describe('custom resolution', () => {
               value: { type: GraphQLString },
               arg: { type: GraphQLString },
             }),
-            subscribe: async ({ arg }) => ({ value: 'subscribed', arg }),
+            subscribe: async ({ arg }, context) => {
+              const { subscript2RabbitMQ } = context;
+              subscript2RabbitMQ();
+              return { value: 'initial-value', arg }
+            },
             getPayload: async ({ value }, { arg }) => ({ value, arg }),
           }),
         },
@@ -111,63 +115,67 @@ describe('custom resolution', () => {
     });
   });
 
-  it('should return value from subscribe', async () => {
-    const result = await graphqlSubscribe({
-      schema,
-      query: `
-        subscription ($input: FooSubscriptionInput!) {
-          foo(input: $input) {
-            value
-            arg
-            clientSubscriptionId
-          }
-        }
-      `,
-      variables: {
-        input: {
-          arg: 'bar',
-          clientSubscriptionId: '2',
-        },
-      },
-    });
+  it('real world example', async () => {
+    var io = require('socket.io')(new require('http').Server(new require('express').default()))
+    io.on('connection', socket => {
+      socket.on('graphql:subscription', request => {
+        const { query, variables } = request;
+        /*
+        query =  `subscription ($input: FooSubscriptionInput!) {
+                foo(input: $input) {
+                  value
+                  arg
+                  clientSubscriptionId
+                }
+              }
+           `
+          variables= {input: {
+                          arg: 'bar',
+                          clientSubscriptionId: 'client-generated-subscription-id',
+                          },
+                      }
+         */
+        const initial_payload = await graphqlSubscribe({
+          schema,
+          query,
+          context: {
+            subscript2RabbitMQ: () => {
+              //****************************************************************/
+              // handle rabbit-mq changes and send udpated payload to client
+              pubSub.subscript('amqp.races', msg => {
+                     pubSub.subscribe('amqp.races', msg => {
+                      const updated_Payload = await graphql(schema, query, msg.updatedVal/*e.g { value: 'rabbitmq-updated'}*/, null/*no context this time*/, variables);
+                      socket.emit('graphql:subscription', updated_payload);
+                      expect(updated_payload.data).to.eql({
+                            foo: {
+                              value: 'rabbitmq-updated',
+                              arg: 'bar',
+                              clientSubscriptionId: 'client-generated-subscription-id',
+                            },
+                          });
+                     });
+              });
+              //****************************************************************/
+            }
+          },
+          variables,
+        });
 
-    expect(result.data).to.eql({
+        socket.emit('graphql:subscription', initial_payload)
+      })
+    })
+
+    //verify that client will receive a payload with clientSubscriptId(which client created in the first place)
+    // and initial payload value;
+    expect(initial_payload.data).to.eql({
       foo: {
-        value: 'subscribed',
+        value: 'initial-value',
         arg: 'bar',
-        clientSubscriptionId: '2',
+        clientSubscriptionId: 'client-generated-subscription-id',
       },
     });
-  });
 
-  it('should get payload', async () => {
-    const result = await graphql(
-      schema,
-      `
-        subscription ($input: FooSubscriptionInput!) {
-          foo(input: $input) {
-            value
-            arg
-            clientSubscriptionId
-          }
-        }
-      `,
-      { value: 'baz' },
-      null,
-      {
-        input: {
-          arg: 'qux',
-          clientSubscriptionId: '3',
-        },
-      },
-    );
 
-    expect(result.data).to.eql({
-      foo: {
-        value: 'baz',
-        arg: 'qux',
-        clientSubscriptionId: '3',
-      },
-    });
+
   });
 });
